@@ -1,0 +1,518 @@
+
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>🍱 AI 食物熱量分析器（卡哇伊版）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body {
+      background: linear-gradient(180deg, #FFF9E8, #FFE9F2);
+      font-family: "Montserrat", "Noto Sans TC", sans-serif;
+    }
+    .cute-card {
+      background: #ffffffee;
+      border-radius: 22px;
+      padding: 20px;
+      box-shadow: 0 8px 0 #f5d1d1;
+      border: 2px solid #ffb6c1;
+      transition: 0.2s;
+    }
+    .cute-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 0 #f2b5b5;
+    }
+    .cute-btn {
+      background: #ffb6c1;
+      padding: 10px 16px;
+      border-radius: 14px;
+      font-weight: bold;
+      color: #5a2a2a;
+      transition: 0.15s;
+    }
+    .cute-btn:hover {
+      background: #ff9fb0;
+      transform: scale(1.05);
+    }
+    .loader {
+      border: 4px solid #ffe4ec;
+      border-top: 4px solid #ff7f9f;
+      border-radius: 50%;
+      width: 26px;
+      height: 26px;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+    }
+    @keyframes spin {
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body class="p-4">
+
+  <div class="max-w-xl mx-auto">
+
+    <!-- Title -->
+    <h1 class="text-center text-3xl font-bold mb-4 text-pink-600">
+      🍱 AI 食物熱量分析器
+    </h1>
+    <p class="text-center text-sm text-pink-700 mb-6">
+      上傳餐點照片，AI 幫你估算 kcal、蛋白質、碳水、脂肪～ 💖
+    </p>
+
+    <!-- Upload card -->
+    <div class="cute-card mb-6">
+      <label
+        class="flex flex-col items-center cursor-pointer"
+        for="imageInput"
+      >
+        <span class="text-pink-600 mb-2 text-sm">點我或拖曳圖片上傳</span>
+        <span class="text-xs text-pink-400">支援 JPG / PNG</span>
+
+        <input
+          id="imageInput"
+          type="file"
+          accept="image/*"
+          class="hidden"
+        />
+      </label>
+
+      <div id="previewBox" class="hidden mt-4">
+        <img id="previewImg" class="rounded-xl border-2 border-pink-300" />
+      </div>
+
+      <div class="flex justify-end mt-4 gap-3">
+        <button id="clearBtn" class="cute-btn text-xs">清除</button>
+        <button id="analyzeBtn" class="cute-btn text-xs opacity-50" disabled>
+          分析熱量 💡
+        </button>
+      </div>
+    </div>
+
+    <!-- Loading -->
+    <div id="loadingBox" class="hidden flex items-center text-pink-600 mb-4">
+      <div class="loader"></div>
+      <span>AI 正在努力分析中……😋</span>
+    </div>
+
+    <!-- Result -->
+    <div id="resultCard" class="cute-card hidden">
+      <h2 class="font-bold text-lg mb-2 text-pink-600">🍙 分析結果</h2>
+
+      <div id="summary" class="grid grid-cols-2 gap-3 text-sm mb-4"></div>
+
+      <div id="items" class="space-y-2 mb-4"></div>
+
+      <div id="notes" class="text-xs text-pink-500"></div>
+    </div>
+
+  </div>
+
+<script>
+/** =========================
+ *  Config / Storage
+ * ========================= */
+const LS_KEY = "ai_food_gemini_key";
+let GEMINI_API_KEY = null;
+
+function loadApiKey() {
+  GEMINI_API_KEY = localStorage.getItem(LS_KEY);
+  return GEMINI_API_KEY;
+}
+function saveApiKey(key) {
+  localStorage.setItem(LS_KEY, key);
+  GEMINI_API_KEY = key;
+}
+function clearApiKey() {
+  localStorage.removeItem(LS_KEY);
+  GEMINI_API_KEY = null;
+}
+
+/** =========================
+ *  DOM refs
+ * ========================= */
+const imageInput = document.getElementById("imageInput");
+const previewBox = document.getElementById("previewBox");
+const previewImg = document.getElementById("previewImg");
+const analyzeBtn = document.getElementById("analyzeBtn");
+const clearBtn = document.getElementById("clearBtn");
+const loadingBox = document.getElementById("loadingBox");
+const resultCard = document.getElementById("resultCard");
+const summary = document.getElementById("summary");
+const items = document.getElementById("items");
+const notes = document.getElementById("notes");
+
+let fileObj = null;
+
+/** =========================
+ *  Security helpers (XSS-safe)
+ * ========================= */
+function clearChildren(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+function el(tag, className) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  return node;
+}
+function setText(node, text) {
+  node.textContent = text == null ? "" : String(text);
+}
+
+/** =========================
+ *  API Key Modal UI (cute)
+ * ========================= */
+function injectApiKeyButtonAndModal() {
+  // Top-right button
+  const container = document.querySelector(".max-w-xl.mx-auto");
+  const topBar = el("div", "flex justify-end mb-3");
+  const btn = el("button", "cute-btn text-xs");
+  setText(btn, "🔑 API Key");
+  btn.type = "button";
+  btn.addEventListener("click", () => openKeyModal());
+  topBar.appendChild(btn);
+
+  container.insertBefore(topBar, container.firstChild);
+
+  // Modal overlay
+  const overlay = el("div", "fixed inset-0 hidden items-center justify-center p-4");
+  overlay.id = "keyModalOverlay";
+  overlay.style.background = "rgba(0,0,0,0.35)";
+  overlay.style.zIndex = "9999";
+
+  // Modal card
+  const modal = el("div", "cute-card w-full max-w-md");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+
+  const title = el("div", "flex items-center justify-between mb-3");
+  const h = el("h3", "font-bold text-lg text-pink-600");
+  setText(h, "🔐 設定 Gemini API Key");
+  const closeX = el("button", "text-pink-500 font-bold px-2");
+  closeX.type = "button";
+  setText(closeX, "✕");
+  closeX.addEventListener("click", () => closeKeyModal());
+  title.appendChild(h);
+  title.appendChild(closeX);
+
+  const hint = el("p", "text-xs text-pink-700 mb-3");
+  setText(hint, "Key 只會存在你的瀏覽器 localStorage（本網站不會上傳或收集 Key）。建議使用「限制型 API Key（HTTP referrer）」以降低外洩風險。");
+
+  const status = el("div", "text-xs mb-2");
+  status.id = "keyStatus";
+
+  const inputWrap = el("div", "mb-3");
+  const label = el("label", "text-xs text-pink-600 block mb-1");
+  setText(label, "Gemini API Key");
+  const inputRow = el("div", "flex gap-2");
+  const input = el("input", "w-full border-2 border-pink-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-pink-400");
+  input.id = "keyInput";
+  input.type = "password";
+  input.autocomplete = "off";
+  input.placeholder = "AIza...";
+
+  const toggle = el("button", "cute-btn text-xs");
+  toggle.type = "button";
+  setText(toggle, "👀");
+  toggle.addEventListener("click", () => {
+    input.type = input.type === "password" ? "text" : "password";
+  });
+
+  inputRow.appendChild(input);
+  inputRow.appendChild(toggle);
+  inputWrap.appendChild(label);
+  inputWrap.appendChild(inputRow);
+
+  const actions = el("div", "flex justify-end gap-2 mt-2");
+  const btnSave = el("button", "cute-btn text-xs");
+  btnSave.type = "button";
+  setText(btnSave, "儲存 ✅");
+  const btnClear = el("button", "cute-btn text-xs");
+  btnClear.type = "button";
+  setText(btnClear, "清除 🧹");
+  const btnCancel = el("button", "cute-btn text-xs");
+  btnCancel.type = "button";
+  setText(btnCancel, "取消");
+
+  btnCancel.addEventListener("click", () => closeKeyModal());
+
+  btnSave.addEventListener("click", () => {
+    const v = (input.value || "").trim();
+    // 基本格式檢查：Gemini key 通常是 AIza...（但不保證，保守只檢查長度/空）
+    if (v.length < 20) {
+      setKeyStatus("❌ Key 看起來太短，請確認是否正確", "text-red-600");
+      return;
+    }
+    saveApiKey(v);
+    setKeyStatus("✅ 已儲存（localStorage）", "text-emerald-700");
+    closeKeyModal();
+  });
+
+  btnClear.addEventListener("click", () => {
+    clearApiKey();
+    input.value = "";
+    setKeyStatus("🧹 已清除", "text-pink-700");
+  });
+
+  actions.appendChild(btnCancel);
+  actions.appendChild(btnClear);
+  actions.appendChild(btnSave);
+
+  modal.appendChild(title);
+  modal.appendChild(hint);
+  modal.appendChild(status);
+  modal.appendChild(inputWrap);
+  modal.appendChild(actions);
+
+  // click outside to close
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeKeyModal();
+  });
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // init status
+  refreshKeyStatus();
+}
+
+function setKeyStatus(msg, className) {
+  const status = document.getElementById("keyStatus");
+  if (!status) return;
+  status.className = `text-xs mb-2 ${className || "text-pink-700"}`;
+  setText(status, msg);
+}
+
+function refreshKeyStatus() {
+  const key = loadApiKey();
+  if (key) setKeyStatus("✅ 目前狀態：已儲存 API Key", "text-emerald-700");
+  else setKeyStatus("⚠ 目前狀態：尚未設定 API Key", "text-pink-700");
+}
+
+function openKeyModal() {
+  const overlay = document.getElementById("keyModalOverlay");
+  const input = document.getElementById("keyInput");
+  refreshKeyStatus();
+  if (input) {
+    input.value = loadApiKey() || "";
+    input.type = "password";
+    input.focus();
+  }
+  overlay.classList.remove("hidden");
+  overlay.classList.add("flex");
+}
+
+function closeKeyModal() {
+  const overlay = document.getElementById("keyModalOverlay");
+  overlay.classList.add("hidden");
+  overlay.classList.remove("flex");
+}
+
+/** =========================
+ *  Gemini call
+ * ========================= */
+async function callGemini(base64) {
+  if (!GEMINI_API_KEY) {
+    openKeyModal();
+    throw new Error("尚未設定 API Key");
+  }
+
+  const prompt = `
+你是一位20年經驗的專業營養師，請從餐點照片估算熱量與三大營養素。
+若餐點為台灣常見食物，請使用台灣常見份量與料理方式估算。
+請「只輸出合法 JSON」，不可加任何說明文字。
+
+JSON 格式如下：
+{
+  "total_kcal": number,
+  "total_protein_g": number,
+  "total_carbs_g": number,
+  "total_fat_g": number,
+  "items": [
+    {
+      "name": string,
+      "estimated_portion": string,
+      "kcal": number,
+      "protein_g": number,
+      "carbs_g": number,
+      "fat_g": number,
+      "confidence": number
+    }
+  ],
+  "confidence_overall": number,
+  "notes": string
+}
+`.trim();
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType: "image/jpeg", data: base64 } }
+          ]
+        }],
+        generationConfig: { temperature: 0.2 }
+      })
+    }
+  );
+
+  const rawText = await response.text();
+  if (!response.ok) {
+    console.log("Gemini error raw:", rawText);
+    throw new Error(`Gemini API 失敗：HTTP ${response.status}`);
+  }
+
+  const json = JSON.parse(rawText);
+  const text = json.candidates?.[0]?.content?.parts
+    ?.map(p => p.text || "")
+    ?.join("")
+    ?.trim();
+
+  if (!text) throw new Error("Gemini 回傳無文字內容");
+
+  // 清理 code fences
+  const cleaned = text
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  return JSON.parse(cleaned);
+}
+
+/** =========================
+ *  File helpers
+ * ========================= */
+function fileToBase64(file) {
+  return new Promise((res) => {
+    const reader = new FileReader();
+    reader.onload = () => res(reader.result.split(",")[1]);
+    reader.readAsDataURL(file);
+  });
+}
+
+/** =========================
+ *  UI event wiring
+ * ========================= */
+// upload preview
+imageInput.addEventListener("change", (e) => {
+  fileObj = e.target.files[0];
+  if (!fileObj) return;
+
+  previewImg.src = URL.createObjectURL(fileObj);
+  previewBox.classList.remove("hidden");
+  analyzeBtn.disabled = false;
+  analyzeBtn.classList.remove("opacity-50");
+  resultCard.classList.add("hidden");
+});
+
+// clear image
+clearBtn.addEventListener("click", () => {
+  imageInput.value = "";
+  previewBox.classList.add("hidden");
+  analyzeBtn.disabled = true;
+  analyzeBtn.classList.add("opacity-50");
+  resultCard.classList.add("hidden");
+});
+
+// analyze
+analyzeBtn.addEventListener("click", async () => {
+  if (!fileObj) return;
+
+  loadingBox.classList.remove("hidden");
+  clearChildren(summary);
+  clearChildren(items);
+  setText(notes, "");
+  resultCard.classList.add("hidden");
+
+  const base64 = await fileToBase64(fileObj);
+
+  try {
+    const raw = await callGemini(base64);
+    renderResultSafe(raw);
+  } catch (err) {
+    console.log(err);
+    resultCard.classList.remove("hidden");
+    setText(notes, "⚠ 分析失敗：請確認 API Key、或稍後再試一次。");
+  } finally {
+    loadingBox.classList.add("hidden");
+  }
+});
+
+/** =========================
+ *  Safe render (no innerHTML)
+ * ========================= */
+function renderResultSafe(r) {
+  resultCard.classList.remove("hidden");
+  clearChildren(summary);
+  clearChildren(items);
+  setText(notes, "");
+
+  // Summary cards
+  const cards = [
+    { label: "總熱量", value: `${r?.total_kcal ?? "—"} kcal` },
+    { label: "蛋白質", value: `${r?.total_protein_g ?? "—"} g` },
+    { label: "碳水", value: `${r?.total_carbs_g ?? "—"} g` },
+    { label: "脂肪", value: `${r?.total_fat_g ?? "—"} g` },
+  ];
+
+  cards.forEach(c => {
+    const box = el("div", "p-3 rounded-lg bg-pink-50 border border-pink-200");
+    const l = el("div", "text-xs text-pink-600");
+    const v = el("div", "text-lg font-bold");
+    setText(l, c.label);
+    setText(v, c.value);
+    box.appendChild(l);
+    box.appendChild(v);
+    summary.appendChild(box);
+  });
+
+  // Items list
+  const arr = Array.isArray(r?.items) ? r.items : [];
+  arr.forEach(x => {
+    const row = el("div", "p-3 rounded-xl bg-white border-2 border-pink-200");
+
+    const name = el("div", "font-bold text-pink-700");
+    setText(name, x?.name ?? "未命名食物");
+
+    const portion = el("div", "text-xs text-pink-500 mb-1");
+    setText(portion, x?.estimated_portion ?? "");
+
+    const meta = el("div", "text-xs");
+    const conf = (typeof x?.confidence === "number") ? `${Math.round(x.confidence * 100)}%` : "—";
+    setText(
+      meta,
+      `kcal: ${x?.kcal ?? "—"}｜蛋白質: ${x?.protein_g ?? "—"} g｜碳水: ${x?.carbs_g ?? "—"} g｜脂肪: ${x?.fat_g ?? "—"} g｜信心度: ${conf}`
+    );
+
+    row.appendChild(name);
+    row.appendChild(portion);
+    row.appendChild(meta);
+    items.appendChild(row);
+  });
+
+  // Notes
+  setText(notes, `備註：${r?.notes ?? "本結果為 AI 推估，可能有 ±20–30% 誤差，僅供參考。"}`);
+}
+
+/** =========================
+ *  Init
+ * ========================= */
+injectApiKeyButtonAndModal();
+loadApiKey(); // try load existing key
+
+// 如果未設定 key，第一次就提醒
+if (!GEMINI_API_KEY) {
+  // 不強迫跳出（你也可以改成直接 openKeyModal();）
+  // openKeyModal();
+}
+</script>
